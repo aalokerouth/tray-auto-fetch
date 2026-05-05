@@ -1,0 +1,12 @@
+/venv
+/license.dat
+*.xlsx
+*.zip
+*.exe
+*.spec
+/dist
+/build
+/archive
+*.log
+/__pycache__
+telegram_engine.py

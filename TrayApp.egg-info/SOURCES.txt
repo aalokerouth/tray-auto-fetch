@@ -1,0 +1,7 @@
+license.dat
+license_system.py
+setup.py
+TrayApp.egg-info/PKG-INFO
+TrayApp.egg-info/SOURCES.txt
+TrayApp.egg-info/dependency_links.txt
+TrayApp.egg-info/top_level.txt
