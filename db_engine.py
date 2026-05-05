@@ -1,6 +1,6 @@
 import sqlite3
 
-DB_PATH = "warehouse.db"
+DB_PATH = "fetch/warehouse.db"
 
 def get_filtered_data():
     with sqlite3.connect(DB_PATH) as conn:

@@ -2,6 +2,9 @@ from datetime import datetime, timedelta
 import sys, os, json, threading, time
 from turtle import right
 import pandas as pd
+from db_engine import get_filtered_data
+import telegram_engine
+import hashlib
 from PySide6.QtWidgets import *
 from PySide6.QtCore import QEvent, QSize, Qt, QAbstractTableModel, QTimer
 from PySide6.QtGui import QAction, QColor
@@ -193,21 +196,32 @@ class PandasModel(QAbstractTableModel):
     def toggle_flash(self):
         if not self.alert_rows:
             return
-            
+
         self.flash_level += self.flash_direction * 25
-    
+
         if self.flash_level >= 255:
             self.flash_level = 255
             self.flash_direction = -1
         elif self.flash_level <= 80:
             self.flash_level = 80
             self.flash_direction = 1
-    
-        # 🔥 OPTIMIZATION: Repaint ONLY the flashing rows, not the whole table
+
+        row_count = self.rowCount()
+        col_count = self.columnCount()
+
+        if row_count == 0 or col_count == 0:
+            return
+
+        # 🔥 SAFE repaint
         for row in self.alert_rows:
+            if row < 0 or row >= row_count:
+                continue  # 🚫 skip invalid rows
+
             top_left = self.index(row, 0)
-            bottom_right = self.index(row, self.columnCount() - 1)
-            self.dataChanged.emit(top_left, bottom_right, [Qt.BackgroundRole])
+            bottom_right = self.index(row, col_count - 1)
+
+            if top_left.isValid() and bottom_right.isValid():
+                self.dataChanged.emit(top_left, bottom_right, [Qt.BackgroundRole])
 
     def headerData(self, col, orientation, role):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
@@ -333,6 +347,8 @@ class App(QMainWindow):
         super().__init__()
 
         self.is_running = False
+        self.last_hash = None
+        self.last_play_time = 0
 
         from PySide6.QtGui import QFont
 
@@ -366,16 +382,20 @@ class App(QMainWindow):
         self.apply_dark()
 
         self.init_ui()
-        self.load_files()
+        # self.load_files()
         self.update_license_status()
         self.license_timer = QTimer()
         self.license_timer.timeout.connect(self.update_license_status)
         self.license_timer.start(60000)
 
         # AUTO REFRESH
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.auto_refresh)
-        self.timer.start(15000)
+        # self.timer = QTimer()
+        # self.timer.timeout.connect(self.auto_refresh)
+        # self.timer.start(15000)
+
+        self.realtime_timer = QTimer()
+        self.realtime_timer.timeout.connect(self.realtime_update)
+        self.realtime_timer.start(20000)  # 20 sec
 
     # =========================
     # UI
@@ -551,8 +571,8 @@ class App(QMainWindow):
         btn_rack = QPushButton("Rack-wise Export")
         btn_rack.clicked.connect(self.export_rack)
 
-        btn_notify = QPushButton("Send to Telegram")
-        btn_notify.clicked.connect(self.rack_notify_telegram)
+        btn_notify = QPushButton("Force Telegram Update")
+        btn_notify.clicked.connect(self.realtime_update)
 
         btn_auto = QPushButton("Run All Presets")
         btn_auto.clicked.connect(self.run_all_presets)
@@ -597,6 +617,47 @@ class App(QMainWindow):
         self.flash_timer = QTimer()
         self.flash_timer.timeout.connect(self.flash_alert_rows)
 
+    def apply_preset_filter_df(self, df, preset):
+        import pandas as pd
+        from datetime import datetime
+
+        filtered = df.copy()
+
+        # ORDER TYPE
+        if preset.get("order_type") and "Order Type" in filtered.columns:
+            filtered = filtered[filtered["Order Type"].isin(preset["order_type"])]
+
+        # ROUTE TYPE
+        if preset.get("route_type") and "Route Type" in filtered.columns:
+            filtered = filtered[filtered["Route Type"].isin(preset["route_type"])]
+
+        # SLOT → mapped to Routetype
+        if preset.get("slot") and "Routetype" in filtered.columns:
+            filtered = filtered[filtered["Routetype"].isin(preset["slot"])]
+
+        # ORDER CLASS
+        if preset.get("order_class") and "Order Class" in filtered.columns:
+            filtered = filtered[filtered["Order Class"].isin(preset["order_class"])]
+
+        # TIME FILTER
+        if "Changed On" in filtered.columns:
+            filtered["Changed On"] = pd.to_datetime(filtered["Changed On"], errors="coerce")
+            filtered = filtered.dropna(subset=["Changed On"])
+
+            from_time = datetime.strptime(preset["from_time"], "%H:%M:%S").time()
+            to_time = datetime.strptime(preset["to_time"], "%H:%M:%S").time()
+
+            def in_time_range(ts):
+                t = ts.time()
+                if from_time <= to_time:
+                    return from_time <= t <= to_time
+                else:
+                    return t >= from_time or t <= to_time
+
+            filtered = filtered[filtered["Changed On"].apply(in_time_range)]
+
+        return filtered
+  
 
     # =========================
     # THEMES
@@ -737,60 +798,60 @@ class App(QMainWindow):
     def start_background_check(self):
         threading.Thread(target=background_check, daemon=True).start()
 
-    def rack_notify_telegram(self):
-        if self.filtered_df is None:
-            return
+    # def rack_notify_telegram(self):
+    #     if self.filtered_df is None:
+    #         return
     
-        import requests
-        import re
+    #     import requests
+    #     import re
     
-        BOT_TOKEN = "8663778811:AAEqvTZYh8Lx6PocVh6zEVCEtF9I59VGdIo"
-        CHAT_ID = "-5117824741"
+    #     BOT_TOKEN = "8663778811:AAEqvTZYh8Lx6PocVh6zEVCEtF9I59VGdIo"
+    #     CHAT_ID = "-5117824741"
     
-        selected_racks = []
+    #     selected_racks = []
     
-        for i in range(self.rack_list.count()):
-            item = self.rack_list.item(i)
-            if item.data(Qt.CheckStateRole) == Qt.Checked:
-                rack = item.text().split(" (")[0]
-                selected_racks.append(rack)
+    #     for i in range(self.rack_list.count()):
+    #         item = self.rack_list.item(i)
+    #         if item.data(Qt.CheckStateRole) == Qt.Checked:
+    #             rack = item.text().split(" (")[0]
+    #             selected_racks.append(rack)
     
-        if not selected_racks:
-            QMessageBox.warning(self, "No Selection", "Select at least one rack")
-            return
+    #     if not selected_racks:
+    #         QMessageBox.warning(self, "No Selection", "Select at least one rack")
+    #         return
 
-    # 🔥 SORT
-        def rack_sort_key(x):
-            nums = re.findall(r'\d+', str(x))
-            return int(nums[0]) if nums else 0
+    # # 🔥 SORT
+    #     def rack_sort_key(x):
+    #         nums = re.findall(r'\d+', str(x))
+    #         return int(nums[0]) if nums else 0
 
-        selected_racks = sorted(selected_racks, key=rack_sort_key)
+    #     selected_racks = sorted(selected_racks, key=rack_sort_key)
 
-    # 🔥 BUILD MESSAGE (CLEAN FORMAT)
-        lines = []
-        for rack in selected_racks:
-            df = self.filtered_df[
-                self.filtered_df["Current Rack Grp"] == rack
-            ]
+    # # 🔥 BUILD MESSAGE (CLEAN FORMAT)
+    #     lines = []
+    #     for rack in selected_racks:
+    #         df = self.filtered_df[
+    #             self.filtered_df["Current Rack Grp"] == rack
+    #         ]
 
-            trays = df["Tray Code"].drop_duplicates().astype(str).tolist()
+    #         trays = df["Tray Code"].drop_duplicates().astype(str).tolist()
 
-            if trays:
-                line = f"{rack}  " + "  ".join(trays)
-                lines.append(line)
+    #         if trays:
+    #             line = f"{rack}  " + "  ".join(trays)
+    #             lines.append(line)
 
-        message = "\n".join(lines)
+    #     message = "\n".join(lines)
 
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    #     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-        try:
-            requests.post(url, data={
-                "chat_id": CHAT_ID,
-                "text": message
-            })
-            QMessageBox.information(self, "Sent", "Message sent to Telegram group")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
+    #     try:
+    #         requests.post(url, data={
+    #             "chat_id": CHAT_ID,
+    #             "text": message
+    #         })
+    #         QMessageBox.information(self, "Sent", "Message sent to Telegram group")
+    #     except Exception as e:
+    #         QMessageBox.critical(self, "Error", str(e))
 
     def apply_light(self):
         self.setStyleSheet("QWidget { background:#f5f5f5; color:#111; }")
@@ -1432,7 +1493,7 @@ class App(QMainWindow):
 
             for attempt in range(3):
                 try:
-                    playm_path = os.path.join(os.path.dirname(sys.executable), "playm.exe")
+                    playm_path = os.path.join(os.getcwd(), "playm.exe")
                     process = subprocess.Popen([playm_path, date_str])
                     
                     while process.poll() is None:
@@ -1558,7 +1619,7 @@ class App(QMainWindow):
         import requests
 
         BOT_TOKEN = "8663778811:AAEqvTZYh8Lx6PocVh6zEVCEtF9I59VGdIo"
-        CHAT_ID = "-5117824741"
+        CHAT_ID = "-5070624209"
 
         slot = ", ".join(self.filters.get("slot", [])) or "All"
         order_type = ", ".join(self.filters.get("order_type", [])) or "All"
@@ -1607,10 +1668,137 @@ class App(QMainWindow):
 
         message = "\n".join(lines)
 
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": message}
-        )
+        telegram_engine.send_new(preset_name, message)
+
+    def realtime_update(self):
+        import time
+        now = time.time()
+    
+        # =========================
+        # 1. FETCH DB DATA
+        # =========================
+        data = get_filtered_data()
+    
+        if not data or self.df is None:
+            return
+    
+        # =========================
+        # 2. BUILD MAP (Tray → Rack)
+        # =========================
+        tray_to_rack = {}
+    
+        for row in data:
+            tray = str(row["Tray Code"])
+            rack = str(row["Current Rack Grp"])
+    
+            # 🔥 FILTER CONDITIONS
+            if rack:
+                try:
+                    num = int(''.join(filter(str.isdigit, rack)))
+                    if num >= 42:
+                        continue
+                except:
+                    pass
+                
+            if str(row.get("Lane", "")) == "16":
+                continue
+            
+            tray_to_rack[tray] = rack
+    
+        # =========================
+        # 3. UPDATE ONLY RACK COLUMN
+        # =========================
+        if "Tray Code" not in self.df.columns or "Current Rack Grp" not in self.df.columns:
+            return
+    
+        self.df["Tray Code"] = self.df["Tray Code"].astype(str)
+    
+        updated_racks = self.df["Tray Code"].map(tray_to_rack)
+    
+        self.df["Current Rack Grp"] = updated_racks.fillna(self.df["Current Rack Grp"])
+    
+        # =========================
+        # 4. REFRESH UI
+        # =========================
+        self.apply_filters()
+    
+        if self.filtered_df is None or self.filtered_df.empty:
+            return
+    
+        # =========================
+        # 5. INIT PREVIOUS STATE
+        # =========================
+        if not hasattr(self, "prev_tray_map"):
+            self.prev_tray_map = {}
+    
+        import hashlib
+        from datetime import datetime
+    
+        # =========================
+        # 6. TELEGRAM PER PRESET
+        # =========================
+        for preset_name, preset in self.presets.items():
+
+            preset_df = self.apply_preset_filter_df(self.df, preset)
+
+            if preset_df.empty:
+                continue
+            
+            rack_map = {}
+            current_tray_map = {}
+
+            for _, row in preset_df.iterrows():
+                rack = str(row["Current Rack Grp"])
+                tray = str(row["Tray Code"])
+
+                lane = str(row.get("Lane", row.get("lane_code", "")))
+
+                try:
+                    lane_num = int(''.join(filter(str.isdigit, lane)))
+                    if 17 <= lane_num <= 30:
+                        tray = f"{tray} [Picking Done]"
+                except:
+                    pass
+                
+                rack_map.setdefault(rack, []).append(tray)
+                current_tray_map[row["Tray Code"]] = rack
+
+            # =========================
+            # MOVEMENT DETECTION
+            # =========================
+            changed = False
+            for tray, rack in current_tray_map.items():
+                prev_rack = self.prev_tray_map.get(tray)
+                if prev_rack and prev_rack != rack:
+                    changed = True
+                    break
+                
+            from datetime import datetime
+            header = f"📦 {preset_name} ({datetime.now().strftime('%H:%M:%S')})"
+            if changed:
+                header += " (edited)"
+
+            lines = [header]
+
+            for rack in sorted(rack_map.keys()):
+                trays = " ".join(rack_map[rack])
+                lines.append(f"{rack}  {trays}")
+
+            message = "\n".join(lines)
+
+            import hashlib
+            current_hash = hashlib.md5(message.encode()).hexdigest()
+
+            if preset_name not in telegram_engine.MESSAGE_IDS:
+                telegram_engine.send_new(preset_name, message)
+            else:
+                last_key = f"{preset_name}_hash"
+                if getattr(self, last_key, None) != current_hash:
+                    telegram_engine.edit(preset_name, message)
+                    setattr(self, last_key, current_hash)
+                    self.log(f"[UPDATED] {preset_name}")
+
+            self.prev_tray_map.update(current_tray_map)
 
     def manage_file_archive(self):
         import shutil
