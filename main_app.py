@@ -233,76 +233,111 @@ class PandasModel(QAbstractTableModel):
 class MultiSelectCombo(QPushButton):
     def __init__(self, parent, key):
         super().__init__("All")
+
         self.parent_widget = parent
         self.key = key
 
         self.menu = QMenu(self)
+
         self.setMenu(self.menu)
 
-        self.actions = []
+        self.selected_values = []
+
+        # ✅ keep menu open
+        self.menu.aboutToHide.connect(
+            self.update_text
+        )
 
     def populate(self, values, selected):
+
         self.menu.clear()
-        self.actions = []
 
-        # 🔍 Search box
-        search_action = QWidgetAction(self.menu)
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search...")
-        self.search_box.textChanged.connect(self.filter_items)
-        search_action.setDefaultWidget(self.search_box)
-        self.menu.addAction(search_action)
+        self.selected_values = list(selected)
 
-        # ✔ Select All
-        select_all = QAction("Select All", self)
-        select_all.triggered.connect(self.select_all)
-        self.menu.addAction(select_all)
+        values = sorted([
+            str(v)
+            for v in values
+            if pd.notna(v)
+        ])
 
-        # ❌ Clear All
-        clear_all = QAction("Clear All", self)
-        clear_all.triggered.connect(self.clear_all)
-        self.menu.addAction(clear_all)
+        for text in values:
 
-        self.menu.addSeparator()
+            action = QWidgetAction(self.menu)
 
-        for v in sorted([str(v) for v in values]):
-            act = QAction(v, self)
-            act.setCheckable(True)
-            act.setChecked(v in selected)
-            act.toggled.connect(self.update_selection)
-            self.menu.addAction(act)
-            self.actions.append(act)
+            checkbox = QCheckBox(text)
+
+            checked = text in selected
+
+            checkbox.setChecked(checked)
+
+            # ✅ bold selected
+            font = checkbox.font()
+            font.setBold(checked)
+            checkbox.setFont(font)
+
+            checkbox.stateChanged.connect(
+                lambda state, t=text, cb=checkbox:
+                self.toggle_item(t, cb)
+            )
+
+            action.setDefaultWidget(checkbox)
+
+            self.menu.addAction(action)
 
         self.update_text()
 
-    def filter_items(self, text):
-        text = text.lower()
-        for act in self.actions:
-            act.setVisible(text in act.text().lower())
+    def toggle_item(self, text, checkbox):
 
-    def select_all(self):
-        for a in self.actions:
-            a.setChecked(True)
+        selected = self.parent_widget.filters.get(
+            self.key,
+            []
+        )
 
-    def clear_all(self):
-        for a in self.actions:
-            a.setChecked(False)
+        if checkbox.isChecked():
 
-    def update_selection(self):
-        selected = [a.text() for a in self.actions if a.isChecked()]
+            if text not in selected:
+                selected.append(text)
+
+        else:
+
+            if text in selected:
+                selected.remove(text)
+
         self.parent_widget.filters[self.key] = selected
+
+        self.selected_values = selected
+
+        # ✅ bold selected
+        font = checkbox.font()
+        font.setBold(checkbox.isChecked())
+        checkbox.setFont(font)
+
         self.update_text()
+
         self.parent_widget.apply_filters()
 
     def update_text(self):
-        selected = [a.text() for a in self.actions if a.isChecked()]
-        if not selected:
-            self.setText("All")
-        elif len(selected) <= 2:
-            self.setText(", ".join(selected))
-        else:
-            self.setText(f"{selected[0]}, {selected[1]} (+{len(selected)-2})")
 
+        selected = self.parent_widget.filters.get(
+            self.key,
+            []
+        )
+
+        if not selected:
+
+            self.setText("All")
+
+        elif len(selected) <= 2:
+
+            self.setText(", ".join(selected))
+
+        else:
+
+            self.setText(
+                f"{selected[0]}, {selected[1]} (+{len(selected)-2})"
+            )
+
+            
 # =========================
 # PROCESS DATA
 # =========================
@@ -431,10 +466,15 @@ class App(QMainWindow):
         self.settings_btn = QPushButton("📂")
         self.settings_btn.setFixedWidth(40)
         self.settings_btn.clicked.connect(self.change_folder)
+
+        btn_output = QPushButton("💾")
+        btn_output.setFixedWidth(40)
+        btn_output.clicked.connect(self.set_output_folder)
         
         settings_layout.addWidget(self.theme_btn)
         settings_layout.addWidget(self.settings_btn)
-        
+        settings_layout.addWidget(btn_output)
+                
         file_layout.addLayout(settings_layout)
         file_group.setLayout(file_layout)
         side.addWidget(file_group)
@@ -743,6 +783,15 @@ class App(QMainWindow):
         QCheckBox::indicator:checked {
             background: #3fb950;
             border: 2px solid #3fb950;
+        }
+
+        QMenu::item:selected {
+            background-color: #238636;
+            color: white;
+        }
+
+        QMenu::indicator:checked {
+            background-color: #238636;
         }
 
         QTableView {
@@ -1111,12 +1160,27 @@ class App(QMainWindow):
         from datetime import datetime
 
         count = len(self.filtered_df)
-        default_name = f"filtered_{count}_rows_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
+
+        default_name = (
+            f"filtered_{count}_rows_"
+            f"{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
+        )
+
+        # ✅ OUTPUT FOLDER
+        default_folder = self.config.get(
+            "output_folder",
+            ""
+        )
+
+        default_path = os.path.join(
+            default_folder,
+            default_name
+        )
 
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save",
-            default_name,   # 🔥 auto filename here
+            default_path,
             "Excel (*.xlsx)"
         )
 
@@ -1126,7 +1190,12 @@ class App(QMainWindow):
         df = self.filtered_df.copy()
 
         if hasattr(self, "tray_counts"):
-            df["Order Count"] = df["Tray Code"].map(self.tray_counts).fillna(1).astype(int)
+            df["Order Count"] = (
+                df["Tray Code"]
+                .map(self.tray_counts)
+                .fillna(1)
+                .astype(int)
+            )
         else:
             df["Order Count"] = 1
 
@@ -1135,51 +1204,92 @@ class App(QMainWindow):
 
         df.to_excel(path, index=False)
 
+        self.log(f"[EXPORT] {path}")
+
+    def set_output_folder(self):
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Folder"
+        )
+
+        if not folder:
+            return
+
+        self.config["output_folder"] = folder
+
+        self.save_json(
+            CONFIG_FILE,
+            self.config
+        )
+
+        self.log(f"[OUTPUT FOLDER] {folder}")
+
     def export_rack(self):
-        default_name = f"rack_report_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
+        from datetime import datetime
+        import re
+    
+        default_name = (
+            f"rack_report_"
+            f"{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
+        )
+    
+        # ✅ OUTPUT FOLDER
+        default_folder = self.config.get(
+            "output_folder",
+            ""
+        )
+    
+        default_path = os.path.join(
+            default_folder,
+            default_name
+        )
+    
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save",
-            default_name,   # 🔥 auto filename
+            default_path,
             "Excel (*.xlsx)"
         )
-
+    
         if not path:
             return
-
-        import re
-
+    
         def rack_sort_key(x):
             nums = re.findall(r'\d+', str(x))
             return int(nums[0]) if nums else 0
-
+    
         racks = sorted(
-            self.filtered_df["Current Rack Grp"].dropna().unique(),
+            self.filtered_df["Current Rack Grp"]
+            .dropna()
+            .unique(),
             key=rack_sort_key
         )
-
+    
         data = []
-
+    
         for r in racks:
+        
             trays = self.filtered_df[
                 self.filtered_df["Current Rack Grp"] == r
             ]["Tray Code"].drop_duplicates().astype(str).tolist()
-
+    
             if trays:
+            
                 row = {"Rack": r}
-
-                # 🔥 Spread trays across columns
+    
                 for i, tray in enumerate(trays, start=1):
                     row[f"Tray{i}"] = tray
-
+    
                 data.append(row)
-
+    
         final_df = pd.DataFrame(data)
-
-        # 🔥 Fill missing cells (important for clean Excel)
+    
         final_df = final_df.fillna("")
-
+    
         final_df.to_excel(path, index=False)
+    
+        self.log(f"[EXPORT] {path}")
 
     def select_all_racks(self):
         self.rack_list.blockSignals(True)
