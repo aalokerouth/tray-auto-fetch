@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 import sys, os, json, threading, time
-from turtle import right
 import pandas as pd
 from db_engine import get_filtered_data
 import telegram_engine
@@ -148,6 +147,8 @@ class PandasModel(QAbstractTableModel):
         self._columns = df.columns.tolist()
         self.order_type_col = self._columns.index("Order Type") if "Order Type" in self._columns else -1
 
+        self.search_text = ""
+
     def rowCount(self, parent=None):
         return len(self.df)
 
@@ -157,36 +158,66 @@ class PandasModel(QAbstractTableModel):
     def data(self, index, role):
         if not index.isValid():
             return None
-            
+
         row = index.row()
         col = index.column()
 
-        # 🔥 FAST ACCESS: Bypass pandas .iloc completely
+        # 🔥 FAST ACCESS
         value = self._data[row, col]
 
+        # =========================
+        # DISPLAY
+        # =========================
         if role == Qt.DisplayRole:
             return str(value)
 
+        # =========================
         # 🎨 BACKGROUND COLORS
+        # =========================
         if role == Qt.BackgroundRole:
+
+            # 🔥 SEARCH HIGHLIGHT PRIORITY
+            if self.search_text:
+                try:
+                    if self.search_text in str(value).lower():
+                        return QColor("#264f78")
+                except:
+                    pass
+
+            # 🔥 HIGHWAY FLASH
             if row in self.alert_rows:
                 return QColor(self.flash_level, 0, 0)
 
+            # 🔥 ORDER TYPE COLORS
             if self.order_type_col != -1:
-                order_type = str(self._data[row, self.order_type_col]).upper()
+
+                order_type = str(
+                    self._data[row, self.order_type_col]
+                ).upper()
+
                 if "B2B" in order_type:
                     return QColor("#FFA500")
+
                 elif "B2C" in order_type:
                     return QColor("#FF4D4D")
+
                 elif "IWT" in order_type:
                     return QColor("#3FB950")
 
+        # =========================
         # 🔠 TEXT COLOR
+        # =========================
         if role == Qt.ForegroundRole:
+
             if row in self.alert_rows:
                 return QBrush(QColor("white"))
+
             if self.order_type_col != -1:
-                order_type = str(self._data[row, self.order_type_col]).upper()
+
+                order_type = str(
+                    self._data[row, self.order_type_col]
+                ).upper()
+
                 if "B2C" in order_type:
                     return QBrush(QColor("white"))
 
@@ -470,11 +501,11 @@ class App(QMainWindow):
         btn_output = QPushButton("💾")
         btn_output.setFixedWidth(40)
         btn_output.clicked.connect(self.set_output_folder)
-        
+
         settings_layout.addWidget(self.theme_btn)
         settings_layout.addWidget(self.settings_btn)
         settings_layout.addWidget(btn_output)
-                
+
         file_layout.addLayout(settings_layout)
         file_group.setLayout(file_layout)
         side.addWidget(file_group)
@@ -559,7 +590,13 @@ class App(QMainWindow):
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search Tray Code")
-        self.search.textChanged.connect(self.apply_filters)
+        self.search_timer = QTimer()
+        self.search_timer.setSingleShot(True)
+        
+        self.search_timer.timeout.connect(
+            self.apply_filters
+        )
+        self.search.textChanged.connect(lambda: self.search_timer.start(250))
         right.addWidget(self.search)
 
         self.remove_st = QCheckBox("Remove ST trays")
@@ -601,14 +638,26 @@ class App(QMainWindow):
         self.rack_list.setItemDelegate(RightCheckDelegate())
 
         self.table = QTableView()
+
+        self.table.setAlternatingRowColors(True)
+
+        self.table.setWordWrap(False)
+
+        self.table.verticalHeader().setDefaultSectionSize(30)
+
+        self.table.horizontalHeader().setStretchLastSection(True)
+
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Interactive
+        )
+        self.table.doubleClicked.connect(
+        self.open_row_details
+        )
+
         self.table.setSortingEnabled(True)
         right.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
-
-        btn_details = QPushButton("Show Details")
-        btn_details.clicked.connect(self.show_tray_details)
-        btn_layout.addWidget(btn_details)
 
         btn_export = QPushButton("Export View")
         btn_export.clicked.connect(self.export_view)
@@ -628,9 +677,6 @@ class App(QMainWindow):
         btn_stop_pw = QPushButton("Stop Auto Download")
         btn_stop_pw.clicked.connect(self.stop_playwright_loop)
 
-
-        
-
         btn_layout.addWidget(btn_notify)
         btn_layout.addWidget(btn_export)
         btn_layout.addWidget(btn_rack)
@@ -644,7 +690,7 @@ class App(QMainWindow):
         self.log_box.setReadOnly(True)
         right.addWidget(self.log_box)
 
-        btn_layout.addWidget(btn_export)
+
         # btn_layout.addWidget(btn_rack)
 
         layout.addLayout(right, 3)
@@ -840,7 +886,20 @@ class App(QMainWindow):
 
     def log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
+
         self.log_box.append(f"[{timestamp}] {msg}")
+
+        # 🔥 KEEP LAST 200 LINES ONLY
+        doc = self.log_box.document()
+
+        while doc.blockCount() > 200:
+
+            cursor = self.log_box.textCursor()
+
+            cursor.movePosition(cursor.Start)
+            cursor.select(cursor.LineUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
 
     def wait_non_blocking(self, seconds):
         """Pauses the script without freezing the GUI event loop"""
@@ -850,84 +909,285 @@ class App(QMainWindow):
         loop.exec()
 
 
-    def show_tray_details(self):
+    # def show_tray_details(self):
+    #     if self.filtered_df is None:
+    #         return
+
+    #     tray, ok = QInputDialog.getText(self, "Tray", "Enter Tray Code")
+
+    #     if not ok or not tray:
+    #         return
+
+    #     if not hasattr(self, "raw_df"):
+    #         QMessageBox.warning(self, "Error", "Raw data not loaded")
+    #         return
+
+    #     try:
+    #         raw = self.raw_df.copy()
+
+    #         # ✅ FIXED: no double header
+    #         raw.columns = raw.columns.astype(str).str.strip()
+
+    #         # ✅ STRICT tray column detection
+    #         tray_col = None
+    #         for c in raw.columns:
+    #             if c.lower().replace(" ", "") == "traycode":
+    #                 tray_col = c
+    #                 break
+
+    #         if not tray_col:
+    #             QMessageBox.warning(self, "Error", "Tray column not found")
+    #             return
+
+    #         tray = tray.strip()
+
+    #         df = raw[
+    #             raw[tray_col].astype(str).str.strip() == tray
+    #         ]
+
+    #         if df.empty:
+    #             QMessageBox.information(self, "Info", "No data found")
+    #             return
+
+    #         cols = [c for c in ["Orderid", "Routetype", "Slot", "Tray Completed Time"] if c in df.columns]
+
+    #         if not cols:
+    #             text = df.to_string(index=False)
+    #         else:
+    #             display_df = df[cols].copy()
+
+    #             # 🔥 Replace missing times
+    #             if "Tray Completed Time" in display_df.columns:
+    #                 display_df["Tray Completed Time"] = (
+    #                     display_df["Tray Completed Time"]
+    #                     .fillna("Not picked yet")
+    #                     .replace("", "Not picked yet")
+    #                 )
+
+    #             text = display_df.to_string(index=False)
+
+    #         dialog = QDialog(self)
+    #         dialog.setWindowTitle(f"Details for {tray}")
+    #         dialog.resize(700, 500)
+
+    #         layout = QVBoxLayout(dialog)
+
+    #         text_box = QTextEdit()
+    #         text_box.setReadOnly(True)
+    #         text_box.setText(text)
+
+    #         layout.addWidget(text_box)
+
+    #         btn = QPushButton("Close")
+    #         btn.clicked.connect(dialog.close)
+    #         layout.addWidget(btn)
+
+    #         dialog.exec()
+
+    #     except Exception as e:
+    #         self.log(f"[DETAIL ERROR] {e}")
+    #         QMessageBox.critical(self, "Error", str(e))
+
+    def open_row_details(self, index):
         if self.filtered_df is None:
             return
 
-        tray, ok = QInputDialog.getText(self, "Tray", "Enter Tray Code")
+        try:
+            row = index.row()
 
-        if not ok or not tray:
-            return
+            tray = str(
+                self.filtered_df.iloc[row]["Tray Code"]
+            ).strip()
+
+            self.show_tray_details_by_tray(tray)
+
+        except Exception as e:
+            self.log(f"[DOUBLE CLICK ERROR] {e}")
+
+    def show_tray_details_by_tray(self, tray):
 
         if not hasattr(self, "raw_df"):
             QMessageBox.warning(self, "Error", "Raw data not loaded")
             return
-
+    
         try:
             raw = self.raw_df.copy()
-
-            # ✅ FIXED: no double header
+    
             raw.columns = raw.columns.astype(str).str.strip()
-
-            # ✅ STRICT tray column detection
+    
             tray_col = None
+    
             for c in raw.columns:
                 if c.lower().replace(" ", "") == "traycode":
                     tray_col = c
                     break
-
+                
             if not tray_col:
                 QMessageBox.warning(self, "Error", "Tray column not found")
                 return
-
-            tray = tray.strip()
-
+    
             df = raw[
                 raw[tray_col].astype(str).str.strip() == tray
-            ]
-
+            ].copy()
+    
             if df.empty:
                 QMessageBox.information(self, "Info", "No data found")
                 return
-
-            cols = [c for c in ["Orderid", "Routetype", "Slot", "Tray Completed Time"] if c in df.columns]
-
-            if not cols:
-                text = df.to_string(index=False)
-            else:
-                display_df = df[cols].copy()
-
-                # 🔥 Replace missing times
-                if "Tray Completed Time" in display_df.columns:
-                    display_df["Tray Completed Time"] = (
-                        display_df["Tray Completed Time"]
-                        .fillna("Not picked yet")
-                        .replace("", "Not picked yet")
-                    )
-
-                text = display_df.to_string(index=False)
-
+    
+            # =========================
+            # CLEAN DISPLAY
+            # =========================
+            wanted_cols = [
+                "Orderid",
+                "Routetype",
+                "Slot",
+                "Order Type",
+                "Pick Type",
+                "Tray Completed Time"
+            ]
+    
+            cols = [
+                c for c in wanted_cols
+                if c in df.columns
+            ]
+    
+            display_df = df[cols].copy()
+    
+            # ✅ CLEAN TIMES
+            if "Tray Completed Time" in display_df.columns:
+            
+                display_df["Tray Completed Time"] = (
+                    display_df["Tray Completed Time"]
+                    .fillna("Not picked yet")
+                    .replace("", "Not picked yet")
+                )
+    
+            display_df = display_df.fillna("-")
+    
+            # =========================
+            # DIALOG
+            # =========================
             dialog = QDialog(self)
-            dialog.setWindowTitle(f"Details for {tray}")
-            dialog.resize(700, 500)
-
+    
+            dialog.setWindowTitle(f"Tray Details - {tray}")
+    
+            dialog.resize(900, 500)
+    
             layout = QVBoxLayout(dialog)
-
-            text_box = QTextEdit()
-            text_box.setReadOnly(True)
-            text_box.setText(text)
-
-            layout.addWidget(text_box)
-
-            btn = QPushButton("Close")
-            btn.clicked.connect(dialog.close)
-            layout.addWidget(btn)
-
+    
+            # =========================
+            # HEADER
+            # =========================
+            title = QLabel(f"Tray: {tray}")
+    
+            title.setStyleSheet("""
+                font-size: 22px;
+                font-weight: bold;
+                padding: 8px;
+                color: #58A6FF;
+            """)
+    
+            layout.addWidget(title)
+    
+            # =========================
+            # SUMMARY
+            # =========================
+            summary = QLabel(
+                f"Orders: {len(display_df)}"
+            )
+    
+            summary.setStyleSheet("""
+                font-size: 14px;
+                padding-left: 10px;
+                padding-bottom: 10px;
+                color: #C9D1D9;
+            """)
+    
+            layout.addWidget(summary)
+    
+            # =========================
+            # TABLE
+            # =========================
+            table = QTableWidget()
+    
+            table.setRowCount(len(display_df))
+            table.setColumnCount(len(display_df.columns))
+    
+            table.setHorizontalHeaderLabels(
+                display_df.columns.tolist()
+            )
+    
+            for r in range(len(display_df)):
+                for c in range(len(display_df.columns)):
+                
+                    value = str(
+                        display_df.iloc[r, c]
+                    )
+    
+                    item = QTableWidgetItem(value)
+    
+                    item.setTextAlignment(
+                        Qt.AlignCenter
+                    )
+    
+                    table.setItem(r, c, item)
+    
+            # =========================
+            # TABLE STYLE
+            # =========================
+            table.setAlternatingRowColors(True)
+    
+            table.setWordWrap(False)
+    
+            table.verticalHeader().setDefaultSectionSize(32)
+    
+            table.horizontalHeader().setStretchLastSection(True)
+    
+            table.horizontalHeader().setSectionResizeMode(
+                QHeaderView.ResizeToContents
+            )
+    
+            table.setEditTriggers(
+                QAbstractItemView.NoEditTriggers
+            )
+    
+            table.setSelectionBehavior(
+                QAbstractItemView.SelectRows
+            )
+    
+            table.setStyleSheet("""
+                QTableWidget {
+                    gridline-color: #30363D;
+                    font-size: 13px;
+                }
+    
+                QHeaderView::section {
+                    background-color: #161B22;
+                    padding: 6px;
+                    border: 1px solid #30363D;
+                    font-weight: bold;
+                }
+            """)
+    
+            layout.addWidget(table)
+    
+            # =========================
+            # CLOSE BUTTON
+            # =========================
+            btn_close = QPushButton("Close")
+    
+            btn_close.setFixedHeight(36)
+    
+            btn_close.clicked.connect(dialog.close)
+    
+            layout.addWidget(btn_close)
+    
             dialog.exec()
-
+    
         except Exception as e:
             self.log(f"[DETAIL ERROR] {e}")
-            QMessageBox.critical(self, "Error", str(e))
+
+
 
     def start_background_check(self):
         threading.Thread(target=background_check, daemon=True).start()
@@ -1030,7 +1290,6 @@ class App(QMainWindow):
                 df = df[df["Pick Type"].astype(str).str.upper() == "PTL"]
 
         if "Order Count" in self.df.columns:
-            df = df.copy()
 
             if "Tray Code" in df.columns:
                 df["Tray Code"] = df["Tray Code"].astype(str)
@@ -1060,6 +1319,8 @@ class App(QMainWindow):
 
         #  SET TABLE MODEL
         model = PandasModel(df, alert_rows)
+
+        model.search_text = self.search.text().strip().lower()
         self.table.setModel(model)
 
         #  UPDATE BANNER (PLACE HERE)
@@ -1139,10 +1400,54 @@ class App(QMainWindow):
             (f" (+{len(checked_racks)-3})" if len(checked_racks) > 3 else "")
         )
 
-        alert_rows, alert_trays = self.get_highway_alert_rows()
+        temp_filtered = df.reset_index(drop=True)
 
-        model = PandasModel(df, alert_rows)
+        highway_mask = (
+            temp_filtered["Current Rack Grp"]
+            .astype(str)
+            .str.upper() == "HW"
+        )
+
+        alert_rows = set()
+        alert_trays = []
+
+        count = 0
+
+        for i in range(len(temp_filtered)-1, -1, -1):
+        
+            if highway_mask.iloc[i]:
+            
+                count += 1
+
+                alert_rows.add(i)
+
+                alert_trays.append(
+                    str(temp_filtered.iloc[i]["Tray Code"])
+                )
+
+                if count >= 7:
+                    break
+                
+            else:
+                break
+            
+        model = PandasModel(temp_filtered, alert_rows)
+
+        model.search_text = (
+            self.search.text()
+            .strip()
+            .lower()
+        )
+
+        self.table.setSortingEnabled(False)
+
+        self.table.setUpdatesEnabled(False)
+
         self.table.setModel(model)
+
+        self.table.setUpdatesEnabled(True)
+
+        self.table.setSortingEnabled(True)
 
         #  UPDATE BANNER
         if alert_trays:
@@ -1159,14 +1464,60 @@ class App(QMainWindow):
     def export_view(self):
         from datetime import datetime
 
-        count = len(self.filtered_df)
+        model = self.table.model()
+
+        if model is None:
+            return
+
+        # =========================
+        # BUILD DF FROM CURRENT TABLE
+        # =========================
+        rows = model.rowCount()
+        cols = model.columnCount()
+
+        data = []
+
+        for r in range(rows):
+
+            row_data = {}
+
+            for c in range(cols):
+
+                header = model.headerData(
+                    c,
+                    Qt.Horizontal,
+                    Qt.DisplayRole
+                )
+
+                value = model.data(
+                    model.index(r, c),
+                    Qt.DisplayRole
+                )
+
+                row_data[header] = value
+
+            data.append(row_data)
+
+        if not data:
+            QMessageBox.warning(
+                self,
+                "Empty",
+                "No visible rows to export"
+            )
+            return
+
+        df = pd.DataFrame(data)
+
+        # =========================
+        # FILE NAME
+        # =========================
+        count = len(df)
 
         default_name = (
             f"filtered_{count}_rows_"
             f"{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
         )
 
-        # ✅ OUTPUT FOLDER
         default_folder = self.config.get(
             "output_folder",
             ""
@@ -1187,24 +1538,12 @@ class App(QMainWindow):
         if not path:
             return
 
-        df = self.filtered_df.copy()
-
-        if hasattr(self, "tray_counts"):
-            df["Order Count"] = (
-                df["Tray Code"]
-                .map(self.tray_counts)
-                .fillna(1)
-                .astype(int)
-            )
-        else:
-            df["Order Count"] = 1
-
-        if "Tray Code" in df.columns:
-            df = df.drop_duplicates(subset=["Tray Code"])
-
+        # =========================
+        # EXPORT
+        # =========================
         df.to_excel(path, index=False)
 
-        self.log(f"[EXPORT] {path}")
+        self.log(f"[EXPORT VIEW] {path}")
 
     def set_output_folder(self):
 
@@ -1228,67 +1567,84 @@ class App(QMainWindow):
     def export_rack(self):
         from datetime import datetime
         import re
-    
+
+        selected_racks = []
+
+        for i in range(self.rack_list.count()):
+            item = self.rack_list.item(i)
+
+            if item.data(Qt.CheckStateRole) == Qt.Checked:
+                rack = item.text().split(" (")[0]
+                selected_racks.append(rack)
+
+        if not selected_racks:
+            QMessageBox.warning(
+                self,
+                "No Selection",
+                "Select at least one rack"
+            )
+            return
+
         default_name = (
             f"rack_report_"
             f"{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
         )
-    
-        # ✅ OUTPUT FOLDER
+
         default_folder = self.config.get(
             "output_folder",
             ""
         )
-    
+
         default_path = os.path.join(
             default_folder,
             default_name
         )
-    
+
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save",
             default_path,
             "Excel (*.xlsx)"
         )
-    
+
         if not path:
             return
-    
+
         def rack_sort_key(x):
             nums = re.findall(r'\d+', str(x))
             return int(nums[0]) if nums else 0
-    
-        racks = sorted(
-            self.filtered_df["Current Rack Grp"]
-            .dropna()
-            .unique(),
+
+        selected_racks = sorted(
+            selected_racks,
             key=rack_sort_key
         )
-    
+
         data = []
-    
-        for r in racks:
-        
+
+        for r in selected_racks:
+
             trays = self.filtered_df[
                 self.filtered_df["Current Rack Grp"] == r
             ]["Tray Code"].drop_duplicates().astype(str).tolist()
-    
+
             if trays:
-            
-                row = {"Rack": r}
-    
+
+                row = {
+                    "Rack": r,
+                    "Tray Count": len(trays)
+                }
+                
                 for i, tray in enumerate(trays, start=1):
                     row[f"Tray{i}"] = tray
-    
+                
                 data.append(row)
-    
+
         final_df = pd.DataFrame(data)
-    
+
         final_df = final_df.fillna("")
-    
+
         final_df.to_excel(path, index=False)
-    
+
         self.log(f"[EXPORT] {path}")
 
     def select_all_racks(self):
@@ -2235,10 +2591,18 @@ class App(QMainWindow):
             # =====================================
             elif msg_id:
 
-                telegram_engine.edit(
+                success = telegram_engine.edit(
                     msg_id,
                     message
                 )
+
+                if success:
+                
+                    setattr(
+                        self,
+                        last_key,
+                        current_hash
+                    )
             
             else:
             
@@ -2252,15 +2616,6 @@ class App(QMainWindow):
                         preset_name,
                         new_id
                     )
-
-            # =========================
-            # SAVE HASH
-            # =========================
-            setattr(
-                self,
-                last_key,
-                current_hash
-            )
 
             # =========================
             # SAVE CLEAN STATE
