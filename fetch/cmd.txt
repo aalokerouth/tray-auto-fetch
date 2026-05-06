@@ -1,0 +1,5 @@
+mitmdump -s interceptor.py
+ python service.p
+  python tray.py
+   python auto_click.py
+ python test.py

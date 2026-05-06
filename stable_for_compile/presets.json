@@ -1,0 +1,79 @@
+{
+    "SAME DAY-1": {
+        "order_type": [
+            "B2B"
+        ],
+        "route_type": [],
+        "slot": [
+            "SAME DAY1"
+        ],
+        "order_class": [
+            "MEDICINE"
+        ],
+        "from_time": "00:00:00",
+        "to_time": "15:00:00",
+        "use_prev_day_until_9": true
+    },
+    "SAME DAY-2": {
+        "order_type": [
+            "B2B"
+        ],
+        "route_type": [],
+        "slot": [
+            "SAME DAY2"
+        ],
+        "order_class": [
+            "MEDICINE"
+        ],
+        "from_time": "09:00:00",
+        "to_time": "16:00:00",
+        "use_prev_day_until_9": false
+    },
+    "B2C PI": {
+        "order_type": [
+            "B2C"
+        ],
+        "route_type": [
+            "NR"
+        ],
+        "slot": [
+            "PanIndia-10000"
+        ],
+        "order_class": [
+            "MEDICINE"
+        ],
+        "from_time": "09:00:00",
+        "to_time": "14:00:00",
+        "use_prev_day_until_9": false
+    },
+    "B2C LR": {
+        "order_type": [
+            "B2C"
+        ],
+        "route_type": [
+            "LR"
+        ],
+        "slot": [],
+        "order_class": [
+            "MEDICINE"
+        ],
+        "from_time": "20:00:00",
+        "to_time": "04:00:00",
+        "use_prev_day_until_9": false
+    },
+    "B2B Night": {
+        "order_type": [
+            "B2B"
+        ],
+        "route_type": [
+            "LR"
+        ],
+        "slot": [],
+        "order_class": [
+            "MEDICINE"
+        ],
+        "from_time": "20:00:00",
+        "to_time": "09:00:00",
+        "use_prev_day_until_9": true
+    }
+}

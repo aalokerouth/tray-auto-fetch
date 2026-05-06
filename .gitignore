@@ -1,0 +1,11 @@
+/venv
+/license.dat
+*.xlsx
+*.zip
+*.exe
+*.spec
+/dist
+/build
+/archive
+*.log
+/__pycache__
