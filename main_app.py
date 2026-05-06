@@ -30,9 +30,8 @@ CONFIG_FILE = "config.json"
 PRESET_FILE = "presets.json"
 
 DISPLAY_COLUMNS = [
-    "Tray Code", "Current Rack Grp", "Pl No",
-     "Route Type",
-    "Routetype", "Order Type"
+    "Tray Code", "Current Rack Grp", "Order Count",
+    "Pl No", "Route Type", "Routetype", "Order Type"
 ]
 
 def get_shift_now():
@@ -307,6 +306,8 @@ class MultiSelectCombo(QPushButton):
 # =========================
 # PROCESS DATA
 # =========================
+
+
 def process_df(df):
     df.columns = df.iloc[0]
     df = df[1:].reset_index(drop=True)
@@ -354,7 +355,7 @@ class App(QMainWindow):
 
         font = QFont()
         font.setFamily("Segoe UI")
-        font.setPointSize(10)
+        font.setPointSize(max(8, 10))
         self.setFont(font)
         self.setWindowTitle("Tray Filter App")
         self.resize(1500, 850)
@@ -564,6 +565,10 @@ class App(QMainWindow):
         right.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
+
+        btn_details = QPushButton("Show Details")
+        btn_details.clicked.connect(self.show_tray_details)
+        btn_layout.addWidget(btn_details)
 
         btn_export = QPushButton("Export View")
         btn_export.clicked.connect(self.export_view)
@@ -795,6 +800,86 @@ class App(QMainWindow):
         QTimer.singleShot(int(seconds * 1000), loop.quit)
         loop.exec()
 
+
+    def show_tray_details(self):
+        if self.filtered_df is None:
+            return
+
+        tray, ok = QInputDialog.getText(self, "Tray", "Enter Tray Code")
+
+        if not ok or not tray:
+            return
+
+        if not hasattr(self, "raw_df"):
+            QMessageBox.warning(self, "Error", "Raw data not loaded")
+            return
+
+        try:
+            raw = self.raw_df.copy()
+
+            # ✅ FIXED: no double header
+            raw.columns = raw.columns.astype(str).str.strip()
+
+            # ✅ STRICT tray column detection
+            tray_col = None
+            for c in raw.columns:
+                if c.lower().replace(" ", "") == "traycode":
+                    tray_col = c
+                    break
+
+            if not tray_col:
+                QMessageBox.warning(self, "Error", "Tray column not found")
+                return
+
+            tray = tray.strip()
+
+            df = raw[
+                raw[tray_col].astype(str).str.strip() == tray
+            ]
+
+            if df.empty:
+                QMessageBox.information(self, "Info", "No data found")
+                return
+
+            cols = [c for c in ["Orderid", "Routetype", "Slot", "Tray Completed Time"] if c in df.columns]
+
+            if not cols:
+                text = df.to_string(index=False)
+            else:
+                display_df = df[cols].copy()
+
+                # 🔥 Replace missing times
+                if "Tray Completed Time" in display_df.columns:
+                    display_df["Tray Completed Time"] = (
+                        display_df["Tray Completed Time"]
+                        .fillna("Not picked yet")
+                        .replace("", "Not picked yet")
+                    )
+
+                text = display_df.to_string(index=False)
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Details for {tray}")
+            dialog.resize(700, 500)
+
+            layout = QVBoxLayout(dialog)
+
+            text_box = QTextEdit()
+            text_box.setReadOnly(True)
+            text_box.setText(text)
+
+            layout.addWidget(text_box)
+
+            btn = QPushButton("Close")
+            btn.clicked.connect(dialog.close)
+            layout.addWidget(btn)
+
+            dialog.exec()
+
+        except Exception as e:
+            self.log(f"[DETAIL ERROR] {e}")
+            QMessageBox.critical(self, "Error", str(e))
+
     def start_background_check(self):
         threading.Thread(target=background_check, daemon=True).start()
 
@@ -873,6 +958,7 @@ class App(QMainWindow):
         self.active_rack_label.setText("All Racks")
 
         df = self.df.copy()
+        df = self.remove_completed_trays(df)
 
         if self.filters["order_type"]:
             df = df[df["Order Type"].isin(self.filters["order_type"])]
@@ -894,10 +980,29 @@ class App(QMainWindow):
             if "Pick Type" in df.columns:
                 df = df[df["Pick Type"].astype(str).str.upper() == "PTL"]
 
+        if "Order Count" in self.df.columns:
+            df = df.copy()
+
+            if "Tray Code" in df.columns:
+                df["Tray Code"] = df["Tray Code"].astype(str)
+
+            if hasattr(self, "tray_counts"):
+                df["Order Count"] = (
+                    df["Tray Code"]
+                    .map(self.tray_counts)
+                    .fillna(1)
+                    .astype(int)
+                )
+            else:
+                df["Order Count"] = 1
+        else:
+            df["Order Count"] = 1
+
         df = df[[c for c in DISPLAY_COLUMNS if c in df.columns]]
 
         if "Tray Code" in df.columns:
             df = df.drop_duplicates(subset=["Tray Code"])
+
 
         self.filtered_df = df
 
@@ -932,19 +1037,21 @@ class App(QMainWindow):
     def update_rack(self, df):
         grp = df.groupby("Current Rack Grp").size()
 
-        # ?? Move Highway to top
-        if "Highway" in grp.index:
-            highway_count = grp["Highway"]
-            grp = grp.drop("Highway")
-            grp = grp.sort_values(ascending=False)
+        import re
 
-            # insert at top
-            grp = pd.concat([
-                pd.Series({"Highway": highway_count}),
-                grp
-            ])
-        else:
-            grp = grp.sort_values(ascending=False)
+        def rack_sort_key(r):
+            if r == "Highway":
+                return (999, "Z")  # always last
+
+            match = re.match(r"(\d+)([A-Z]?)", str(r))
+            if match:
+                num = int(match.group(1))
+                letter = match.group(2) or ""
+                return (num, letter)
+
+            return (999, str(r))
+
+        grp = grp.sort_index(key=lambda x: [rack_sort_key(i) for i in x])
 
         self.rack_list.blockSignals(True)
         self.rack_list.clear()
@@ -1017,6 +1124,11 @@ class App(QMainWindow):
             return
 
         df = self.filtered_df.copy()
+
+        if hasattr(self, "tray_counts"):
+            df["Order Count"] = df["Tray Code"].map(self.tray_counts).fillna(1).astype(int)
+        else:
+            df["Order Count"] = 1
 
         if "Tray Code" in df.columns:
             df = df.drop_duplicates(subset=["Tray Code"])
@@ -1289,32 +1401,101 @@ class App(QMainWindow):
 
     def load_file(self):
         file = self.file_box.currentText()
-        
-        # 🔥 FIX: Ignore if the dropdown is momentarily empty during a refresh
+
         if not file:
             return
-            
+
         path = os.path.join(self.folder, file)
-    
-        # ❌ skip temp excel lock files
+
         if "~$" in path:
             self.log("[SKIP] Temp file detected")
             return
-    
-        # 🔥 wait if file still writing
+
+        # =========================
+        # READ EXCEL SAFELY
+        # =========================
         for _ in range(5):
             try:
-                df = pd.read_excel(path, header=2)
+                raw_df = pd.read_excel(path, header=2)
+                self.raw_df = raw_df
                 break
             except PermissionError:
                 self.wait_non_blocking(1)
         else:
             self.log("[ERROR] File still locked")
             return
-    
-        df = process_df(df)
-    
+
+        temp_df = raw_df.copy()
+
+        # Apply ONLY header fix (NOT process_df)
+        temp_df.columns = temp_df.iloc[0]
+        temp_df = temp_df[1:].reset_index(drop=True)
+        temp_df.columns = temp_df.columns.astype(str).str.strip()
+        
+        # =========================
+        # 🔍 FIND REQUIRED COLUMNS
+        # =========================
+        tray_col = None
+        order_col = None
+        
+        for c in temp_df.columns:
+            c_low = c.lower().replace(" ", "")
+        
+            if c_low == "traycode":
+                tray_col = c
+        
+            if c_low == "orderid":
+                order_col = c
+        
+        # DEBUG
+        self.log(f"[DEBUG] tray_col: {tray_col}")
+        self.log(f"[DEBUG] order_col: {order_col}")
+        
+        # =========================
+        # 🔥 STEP 2: COUNT BEFORE DEDUPE
+        # =========================
+        if tray_col and order_col:
+        
+            temp_df[tray_col] = temp_df[tray_col].astype(str)
+        
+            tray_counts = (
+                temp_df.groupby(tray_col)[order_col]
+                .nunique()
+                .to_dict()
+            )
+        
+            self.tray_counts = tray_counts
+            self.log(f"[OK] Tray counts computed (RAW): {len(tray_counts)}")
+        
+        else:
+            self.tray_counts = {}
+            self.log("[FAIL] Tray Code / Orderid not found")
+        
+        # =========================
+        # 🔥 STEP 3: PROCESS DATA FOR UI
+        # =========================
+        df = process_df(raw_df)
+
+        # =========================
+        # 🔥 STEP 4: MAP BACK ORDER COUNT
+        # =========================
+        if "Tray Code" in df.columns:
+            df["Tray Code"] = df["Tray Code"].astype(str)
+
+            if hasattr(self, "tray_counts"):
+                df["Order Count"] = df["Tray Code"].map(self.tray_counts).fillna(1).astype(int)
+            else:
+                df["Order Count"] = 1
+        else:
+            df["Order Count"] = 1
+
+        # =========================
+        # SAVE + REFRESH UI
+        # =========================
         self.df = df
+
+        self.log(f"[COUNT LOADED] trays with counts: {len(self.tray_counts)}")
+
         self.populate_filters()
         self.apply_filters()
 
@@ -1453,6 +1634,19 @@ class App(QMainWindow):
 
             self.populate_filters()
             self.apply_filters()
+
+    def remove_completed_trays(self, df):
+        if "Tray Code" not in df.columns or "Tray Completed Time" not in df.columns:
+            return df
+
+        grouped = df.groupby("Tray Code")
+        keep_trays = []
+
+        for tray, group in grouped:
+            if group["Tray Completed Time"].isna().any():
+                keep_trays.append(tray)
+
+        return df[df["Tray Code"].isin(keep_trays)]
 
     def run_all_presets(self):
         import time
@@ -1673,25 +1867,25 @@ class App(QMainWindow):
     def realtime_update(self):
         import time
         now = time.time()
-    
+
         # =========================
         # 1. FETCH DB DATA
         # =========================
         data = get_filtered_data()
-    
+
         if not data or self.df is None:
             return
-    
+
         # =========================
         # 2. BUILD MAP (Tray → Rack)
         # =========================
         tray_to_rack = {}
-    
+
         for row in data:
             tray = str(row["Tray Code"])
             rack = str(row["Current Rack Grp"])
-    
-            # 🔥 FILTER CONDITIONS
+
+            # 🚫 skip rack >= 42
             if rack:
                 try:
                     num = int(''.join(filter(str.isdigit, rack)))
@@ -1699,69 +1893,98 @@ class App(QMainWindow):
                         continue
                 except:
                     pass
-                
+
+            # 🚫 skip lane 16
             if str(row.get("Lane", "")) == "16":
                 continue
-            
+
             tray_to_rack[tray] = rack
-    
+
         # =========================
         # 3. UPDATE ONLY RACK COLUMN
         # =========================
         if "Tray Code" not in self.df.columns or "Current Rack Grp" not in self.df.columns:
             return
-    
+
         self.df["Tray Code"] = self.df["Tray Code"].astype(str)
-    
+
         updated_racks = self.df["Tray Code"].map(tray_to_rack)
-    
         self.df["Current Rack Grp"] = updated_racks.fillna(self.df["Current Rack Grp"])
-    
+
         # =========================
         # 4. REFRESH UI
         # =========================
         self.apply_filters()
-    
+
         if self.filtered_df is None or self.filtered_df.empty:
             return
-    
+
         # =========================
         # 5. INIT PREVIOUS STATE
         # =========================
         if not hasattr(self, "prev_tray_map"):
             self.prev_tray_map = {}
-    
-        import hashlib
+
         from datetime import datetime
-    
+        import hashlib
+
         # =========================
         # 6. TELEGRAM PER PRESET
         # =========================
         for preset_name, preset in self.presets.items():
 
             preset_df = self.apply_preset_filter_df(self.df, preset)
-
+            preset_df = self.remove_completed_trays(preset_df)
+            
             if preset_df.empty:
                 continue
             
+            # ✅ correct mapping
+            preset_df = preset_df.copy()
+
+            if "Tray Code" in preset_df.columns:
+                preset_df["Tray Code"] = preset_df["Tray Code"].astype(str)
+            
+            if hasattr(self, "tray_counts"):
+                preset_df["Order Count"] = (
+                    preset_df["Tray Code"]
+                    .map(self.tray_counts)
+                    .fillna(1)
+                    .astype(int)
+                )
+            else:
+                preset_df["Order Count"] = 1
+                
             rack_map = {}
             current_tray_map = {}
 
+            # =========================
+            # BUILD MESSAGE DATA
+            # =========================
             for _, row in preset_df.iterrows():
                 rack = str(row["Current Rack Grp"])
-                tray = str(row["Tray Code"])
 
+                base_tray = str(row["Tray Code"])
+                count = row.get("Order Count", 1)
+
+                display_tray = f"{base_tray} ({count})"
+
+                # =========================
+                # ✅ PICKING DONE LOGIC
+                # =========================
                 lane = str(row.get("Lane", row.get("lane_code", "")))
 
                 try:
                     lane_num = int(''.join(filter(str.isdigit, lane)))
                     if 17 <= lane_num <= 30:
-                        tray = f"{tray} [Picking Done]"
+                        display_tray += " [Picking Done]"
                 except:
                     pass
-                
-                rack_map.setdefault(rack, []).append(tray)
-                current_tray_map[row["Tray Code"]] = rack
+
+                rack_map.setdefault(rack, []).append(display_tray)
+
+                # 🔥 IMPORTANT: keep clean mapping
+                current_tray_map[base_tray] = rack
 
             # =========================
             # MOVEMENT DETECTION
@@ -1772,8 +1995,10 @@ class App(QMainWindow):
                 if prev_rack and prev_rack != rack:
                     changed = True
                     break
-                
-            from datetime import datetime
+
+            # =========================
+            # BUILD MESSAGE
+            # =========================
             header = f"📦 {preset_name} ({datetime.now().strftime('%H:%M:%S')})"
             if changed:
                 header += " (edited)"
@@ -1781,24 +2006,34 @@ class App(QMainWindow):
             lines = [header]
 
             for rack in sorted(rack_map.keys()):
-                trays = " ".join(rack_map[rack])
+                trays_list = rack_map.get(rack, [])
+
+                if not isinstance(trays_list, list):
+                    trays_list = [str(trays_list)]
+
+                trays = " ".join(map(str, trays_list))
                 lines.append(f"{rack}  {trays}")
 
             message = "\n".join(lines)
 
-            import hashlib
             current_hash = hashlib.md5(message.encode()).hexdigest()
 
+            # =========================
+            # SEND / EDIT TELEGRAM
+            # =========================
             if preset_name not in telegram_engine.MESSAGE_IDS:
                 telegram_engine.send_new(preset_name, message)
             else:
                 last_key = f"{preset_name}_hash"
+
                 if getattr(self, last_key, None) != current_hash:
                     telegram_engine.edit(preset_name, message)
                     setattr(self, last_key, current_hash)
                     self.log(f"[UPDATED] {preset_name}")
 
+            # SAVE STATE
             self.prev_tray_map.update(current_tray_map)
+
 
     def manage_file_archive(self):
         import shutil
