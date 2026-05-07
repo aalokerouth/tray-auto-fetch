@@ -8,7 +8,7 @@ import pandas as pd
 # CONFIG
 # =====================================
 BOT_TOKEN = "8663778811:AAEqvTZYh8Lx6PocVh6zEVCEtF9I59VGdIo"
-CHAT_ID = "-5070624209"
+CHAT_ID = "-5117824741"
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 

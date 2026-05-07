@@ -9,3 +9,4 @@
 /archive
 *.log
 /__pycache__
+/dist

@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: TrayApp
-Version: 1.0
-Summary: Tray Filter App
+Version: 1.3
+Summary: Automated tray status fetcher and Telegram notifier
 License-File: license.dat
 License-File: license_system.py
 Dynamic: license-file

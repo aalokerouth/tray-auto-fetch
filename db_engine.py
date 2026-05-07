@@ -1,23 +1,45 @@
-import sqlite3
+import pymysql
 import pandas as pd
+import warnings
 
-DB_PATH = "fetch/warehouse.db"
+# Suppress pandas warning about not using SQLAlchemy
+warnings.filterwarnings('ignore', 'pandas only supports SQLAlchemy connectable')
 
+# --- MySQL Configuration ---
+MYSQL_HOST = "172.31.0.203"
+MYSQL_USER = "dbadmin"          # Change to your MySQL username
+MYSQL_PASS = "12345"      # Change to your MySQL password
+MYSQL_DB   = "warehouse"     # Change to your database name
+
+def get_db_connection():
+    return pymysql.connect(
+        host=MYSQL_HOST,
+        user=MYSQL_USER,
+        password=MYSQL_PASS,
+        database=MYSQL_DB,
+        cursorclass=pymysql.cursors.DictCursor
+    )
 
 def get_filtered_data():
-
-    with sqlite3.connect(DB_PATH) as conn:
-
+    try:
+        conn = get_db_connection()
         # =========================
-        # LOAD DB
+        # LOAD DB FROM MYSQL
         # =========================
+        # We order by last_updated so that drop_duplicates(keep="last") works correctly
         db_df = pd.read_sql("""
             SELECT
                 tray_id,
                 lane_code,
-                location
+                location,
+                last_updated
             FROM tray_data
+            ORDER BY last_updated ASC
         """, conn)
+        conn.close()
+    except Exception as e:
+        print(f"[!] Database connection error: {e}")
+        return []
 
     # =========================
     # EMPTY SAFETY
@@ -34,10 +56,6 @@ def get_filtered_data():
 
     # =========================
     # KEEP LATEST TRAY ONLY
-    # =========================
-    # IMPORTANT:
-    # SQLite rowid newest = latest update
-    # so keep LAST duplicate
     # =========================
     db_df = db_df.reset_index()
 

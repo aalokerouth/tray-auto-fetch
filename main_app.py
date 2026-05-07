@@ -4,6 +4,8 @@ import pandas as pd
 from db_engine import get_filtered_data
 import telegram_engine
 import hashlib
+import ctypes
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import *
 from PySide6.QtCore import QEvent, QSize, Qt, QAbstractTableModel, QTimer
 from PySide6.QtGui import QAction, QColor
@@ -2701,18 +2703,31 @@ class App(QMainWindow):
 # START
 # =========================
 if __name__ == "__main__":
+    
+    # 1. Tell Windows this is a distinct app (forces the taskbar to use your custom icon instead of Python's)
+    try:
+        myappid = 'warehouse.trayapp.1.1' # Arbitrary unique ID
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+
     ok, msg, _ = validate_license()
     if not ok:
         app = QApplication(sys.argv)
+        # Set icon for the error dialog just in case
+        app.setWindowIcon(QIcon("logo.ico")) 
         QMessageBox.critical(None, "License Error", msg)
         sys.exit()
 
     app = QApplication(sys.argv)
+    
+    # 2. Set the icon for the Application
+    app.setWindowIcon(QIcon("logo.ico")) 
 
     win = App()
     win.show()
 
-    # ✅ run AFTER window exists
+    # ? run AFTER window exists
     QTimer.singleShot(5000, win.start_background_check)
 
     sys.exit(app.exec())
